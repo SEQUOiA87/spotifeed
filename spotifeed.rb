@@ -14,6 +14,7 @@ class Redis
 end
 
 $redis = Redis.new
+$timeout_seconds = 300 # 5 minutes
 
 class Spotifeed < Sinatra::Base
   configure :development do
@@ -35,12 +36,29 @@ class Spotifeed < Sinatra::Base
     show_id = params[:show_id] || ENV['SHOW_ID']
     return '' unless show_id =~ /\A\w{22}\z/
 
-    show = $redis.cache("show:#{show_id}", 3600) do
+    show = $redis.cache("show:#{show_id}", $timeout_seconds) do
+      # puts "get show with id #{show_id} from Spotify API"
       JSON.generate spotify.conn.get("shows/#{show_id}?market=US").body
     end
     show = JSON.parse(show)
-
     return 'Not a valid show' if show['error']
+
+    episodes = $redis.cache("episodes:#{show_id}", $timeout_seconds) do
+      # puts "get episodes of show with id #{show_id} from Spotify API"
+      request = "shows/#{show_id}/episodes?market=US&limit=50"
+      episodeList = []
+      loop do
+        data = spotify.conn.get(request).body
+
+        episodeList += data['items']
+    
+        break if !data['next']
+        request = data['next'].split('/v1/').last
+      end
+      JSON.generate episodeList
+    end
+    episodes = JSON.parse(episodes)
+    return 'No episodes found' if episodes.empty?
 
     content_type 'application/rss+xml; charset=utf-8'
     RSS::Maker::RSS20.make do |rss|
@@ -57,10 +75,10 @@ class Spotifeed < Sinatra::Base
       rss.channel.itunes_image = show.dig('images', 0, 'url')
 
       rss.channel.updated = Time.parse(show.dig('episodes', 'items', 0, 'release_date') || '01-01-2020').to_s
-      rss.channel.generator = 'Spotifeed'
+      # rss.channel.generator = 'Spotifeed'
 
       rss.items.do_sort = true
-      show.dig('episodes', 'items').each do |episode|
+      episodes.each do |episode|
         rss.items.new_item do |item|
           duration_secs = (episode['duration_ms'] / 1000).floor
 
